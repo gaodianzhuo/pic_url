@@ -2,6 +2,7 @@ use actix_files::NamedFile;
 use actix_web::{get, web, App, HttpResponse, HttpServer, middleware, Result};
 use image::imageops::FilterType;
 use image::GenericImageView;
+use serde::Serialize;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,6 +24,18 @@ impl AppConfig {
             thumb_dir: Arc::new(thumb_dir),
         }
     }
+}
+
+#[derive(Serialize)]
+struct ImageInfo {
+    path: String,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct ImageListResponse {
+    count: usize,
+    images: Vec<ImageInfo>,
 }
 
 fn is_image_file(path: &Path) -> bool {
@@ -128,6 +141,35 @@ fn collect_images(dir: &Path, base: &Path, images: &mut Vec<String>) {
     }
 }
 
+#[get("/api/images")]
+async fn api_images(config: web::Data<AppConfig>) -> HttpResponse {
+    let pic_path = Path::new(config.pic_dir.as_str());
+    let mut image_paths: Vec<String> = Vec::new();
+    collect_images(pic_path, pic_path, &mut image_paths);
+    image_paths.sort();
+
+    let images: Vec<ImageInfo> = image_paths
+        .iter()
+        .map(|img| ImageInfo {
+            path: img.clone(),
+            name: Path::new(img)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+        })
+        .collect();
+
+    let response = ImageListResponse {
+        count: images.len(),
+        images,
+    };
+
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .json(response)
+}
+
 #[get("/")]
 async fn index(config: web::Data<AppConfig>) -> HttpResponse {
     let pic_path = Path::new(config.pic_dir.as_str());
@@ -138,33 +180,33 @@ async fn index(config: web::Data<AppConfig>) -> HttpResponse {
     let image_items: String = images
         .iter()
         .map(|img| {
+            let name = Path::new(img).file_name().unwrap_or_default().to_string_lossy();
             format!(
-                r#"<div class="image-item" onclick="openModal('/pic/{}', '{}')">
+                r#"<div class="image-item" data-path="{}" onclick="openModal('/pic/{}', '{}')">
                     <img src="/thumb/{}" alt="{}" loading="lazy">
-                    <div class="image-name">{}</div>
+                    <div class="overlay"><div class="image-name">{}</div></div>
                 </div>"#,
-                img, img, img, img,
-                Path::new(img).file_name().unwrap_or_default().to_string_lossy()
+                img, img, img, img, img, name
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
 
     let empty_msg = format!(
-        r#"<div class="empty-state">
-            <h2>暂无图片</h2>
-            <p>请将图片放入 {} 目录</p>
+        r#"<div class="empty-state" id="emptyState">
+            <h2>No images</h2>
+            <p>Add images to {}</p>
         </div>"#,
         config.pic_dir
     );
 
     let html = format!(
         r#"<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>图床 - 图片浏览</title>
+    <title>Gallery</title>
     <style>
         * {{
             margin: 0;
@@ -174,68 +216,163 @@ async fn index(config: web::Data<AppConfig>) -> HttpResponse {
 
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            background: #0a0a0f;
             min-height: 100vh;
-            padding: 20px;
         }}
 
-        .header {{
-            text-align: center;
-            padding: 30px 0;
-            color: #fff;
+        .toolbar {{
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 50px;
+            background: rgba(15, 15, 20, 0.95);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 24px;
+            z-index: 100;
         }}
 
-        .header h1 {{
-            font-size: 2.5rem;
-            margin-bottom: 10px;
-            background: linear-gradient(90deg, #00d4ff, #7b2cbf);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
+        .toolbar-left {{
+            display: flex;
+            align-items: center;
+            gap: 12px;
         }}
 
-        .header p {{
-            color: #8892b0;
-            font-size: 1rem;
+        .status-indicator {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #64748b;
+            font-size: 0.85rem;
+        }}
+
+        .status-dot {{
+            width: 6px;
+            height: 6px;
+            background: #22c55e;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }}
+
+        @keyframes pulse {{
+            0%, 100% {{ opacity: 1; }}
+            50% {{ opacity: 0.4; }}
+        }}
+
+        .image-count {{
+            color: #e2e8f0;
+            font-weight: 500;
+        }}
+
+        .toolbar-right {{
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            color: #64748b;
+            font-size: 0.8rem;
+        }}
+
+        .size-toggle {{
+            display: flex;
+            gap: 4px;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 4px;
+            border-radius: 6px;
+        }}
+
+        .size-btn {{
+            padding: 6px 12px;
+            border: none;
+            background: transparent;
+            color: #64748b;
+            font-size: 0.75rem;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }}
+
+        .size-btn:hover {{
+            color: #e2e8f0;
+        }}
+
+        .size-btn.active {{
+            background: rgba(255, 255, 255, 0.1);
+            color: #e2e8f0;
         }}
 
         .gallery {{
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-            gap: 20px;
-            max-width: 1400px;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 12px;
+            padding: 70px 20px 20px 20px;
+            max-width: 1800px;
             margin: 0 auto;
-            padding: 20px;
+            transition: gap 0.3s;
+        }}
+
+        .gallery.size-large {{
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 16px;
+        }}
+
+        .gallery.size-medium {{
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 12px;
+        }}
+
+        .gallery.size-small {{
+            grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+            gap: 8px;
+        }}
+
+        .gallery.size-small .overlay {{
+            display: none;
         }}
 
         .image-item {{
-            background: rgba(255, 255, 255, 0.05);
-            border-radius: 12px;
+            position: relative;
+            aspect-ratio: 1;
+            border-radius: 8px;
             overflow: hidden;
             cursor: pointer;
-            transition: all 0.3s ease;
-            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: #16161d;
+            transition: transform 0.2s, box-shadow 0.2s;
         }}
 
         .image-item:hover {{
-            transform: translateY(-5px);
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
-            border-color: rgba(0, 212, 255, 0.3);
+            transform: scale(1.02);
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
         }}
 
         .image-item img {{
             width: 100%;
-            height: 180px;
+            height: 100%;
             object-fit: cover;
             display: block;
-            background: rgba(0, 0, 0, 0.2);
         }}
 
-        .image-name {{
-            padding: 12px;
-            color: #ccd6f6;
-            font-size: 0.85rem;
-            text-align: center;
+        .image-item .overlay {{
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            padding: 30px 10px 10px;
+            background: linear-gradient(transparent, rgba(0,0,0,0.8));
+            opacity: 0;
+            transition: opacity 0.2s;
+        }}
+
+        .image-item:hover .overlay {{
+            opacity: 1;
+        }}
+
+        .image-item .image-name {{
+            color: #fff;
+            font-size: 0.75rem;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -244,11 +381,8 @@ async fn index(config: web::Data<AppConfig>) -> HttpResponse {
         .modal {{
             display: none;
             position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0, 0, 0, 0.95);
+            inset: 0;
+            background: rgba(0, 0, 0, 0.98);
             z-index: 1000;
             justify-content: center;
             align-items: center;
@@ -261,107 +395,141 @@ async fn index(config: web::Data<AppConfig>) -> HttpResponse {
 
         .modal-content {{
             max-width: 95vw;
-            max-height: 85vh;
+            max-height: 90vh;
             position: relative;
         }}
 
         .modal-content img {{
             max-width: 100%;
-            max-height: 85vh;
+            max-height: 90vh;
             object-fit: contain;
-            border-radius: 8px;
-            box-shadow: 0 0 50px rgba(0, 0, 0, 0.5);
         }}
 
         .modal-close {{
             position: absolute;
             top: 20px;
-            right: 30px;
-            font-size: 40px;
-            color: #fff;
+            right: 24px;
+            font-size: 32px;
+            color: #94a3b8;
             cursor: pointer;
             z-index: 1001;
-            transition: color 0.3s;
+            transition: color 0.2s;
+            font-weight: 300;
         }}
 
         .modal-close:hover {{
-            color: #00d4ff;
+            color: #fff;
         }}
 
         .modal-info {{
-            margin-top: 15px;
-            color: #8892b0;
-            text-align: center;
-            font-size: 0.9rem;
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(10px);
+            padding: 12px 20px;
+            border-radius: 8px;
+        }}
+
+        .modal-info span {{
+            color: #e2e8f0;
+            font-size: 0.85rem;
         }}
 
         .modal-info a {{
-            color: #00d4ff;
+            color: #60a5fa;
             text-decoration: none;
-            margin-left: 10px;
+            font-size: 0.85rem;
+            transition: color 0.2s;
         }}
 
         .modal-info a:hover {{
-            text-decoration: underline;
+            color: #93c5fd;
         }}
 
         .empty-state {{
+            grid-column: 1 / -1;
             text-align: center;
-            padding: 60px 20px;
-            color: #8892b0;
+            padding: 80px 20px;
+            color: #64748b;
         }}
 
         .empty-state h2 {{
-            font-size: 1.5rem;
-            margin-bottom: 10px;
-            color: #ccd6f6;
+            font-size: 1.2rem;
+            margin-bottom: 8px;
+            color: #94a3b8;
+            font-weight: 500;
         }}
 
-        .loading {{
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 180px;
-            background: rgba(0, 0, 0, 0.2);
+        .toast {{
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 10px 20px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            z-index: 2000;
+            opacity: 0;
+            transition: opacity 0.3s;
+            border: 1px solid rgba(255, 255, 255, 0.1);
         }}
 
-        .spinner {{
-            width: 40px;
-            height: 40px;
-            border: 3px solid rgba(255, 255, 255, 0.1);
-            border-top-color: #00d4ff;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-        }}
-
-        @keyframes spin {{
-            to {{ transform: rotate(360deg); }}
+        .toast.show {{
+            opacity: 1;
         }}
 
         @media (max-width: 768px) {{
             .gallery {{
-                grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-                gap: 12px;
-                padding: 10px;
+                padding: 60px 10px 10px 10px;
             }}
 
-            .image-item img {{
-                height: 120px;
+            .gallery.size-large {{
+                grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
             }}
 
-            .header h1 {{
-                font-size: 1.8rem;
+            .gallery.size-medium {{
+                grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            }}
+
+            .gallery.size-small {{
+                grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+            }}
+
+            .toolbar {{
+                padding: 0 12px;
+            }}
+
+            .size-btn {{
+                padding: 6px 10px;
             }}
         }}
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>本地图床</h1>
-        <p>共 {} 张图片 | 点击缩略图查看大图</p>
+    <div class="toolbar">
+        <div class="toolbar-left">
+            <div class="status-indicator">
+                <span class="status-dot"></span>
+                <span class="image-count"><span id="imageCount">{}</span> images</span>
+            </div>
+        </div>
+        <div class="toolbar-right">
+            <div class="size-toggle">
+                <button class="size-btn" data-size="large" onclick="setSize('large')">L</button>
+                <button class="size-btn active" data-size="medium" onclick="setSize('medium')">M</button>
+                <button class="size-btn" data-size="small" onclick="setSize('small')">S</button>
+            </div>
+        </div>
     </div>
 
-    <div class="gallery">
+    <div class="gallery size-medium" id="gallery">
         {}
     </div>
 
@@ -379,7 +547,11 @@ async fn index(config: web::Data<AppConfig>) -> HttpResponse {
         </div>
     </div>
 
+    <div class="toast" id="toast"></div>
+
     <script>
+        let currentImages = new Set({});
+
         function openModal(src, filename) {{
             const modal = document.getElementById('imageModal');
             const modalImg = document.getElementById('modalImage');
@@ -413,12 +585,112 @@ async fn index(config: web::Data<AppConfig>) -> HttpResponse {
                 closeModal();
             }}
         }});
+
+        function showToast(message) {{
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), 3000);
+        }}
+
+        function setSize(size) {{
+            const gallery = document.getElementById('gallery');
+            gallery.classList.remove('size-large', 'size-medium', 'size-small');
+            gallery.classList.add('size-' + size);
+
+            document.querySelectorAll('.size-btn').forEach(btn => {{
+                btn.classList.toggle('active', btn.dataset.size === size);
+            }});
+
+            localStorage.setItem('gallery-size', size);
+        }}
+
+        // 恢复保存的尺寸设置
+        (function() {{
+            const savedSize = localStorage.getItem('gallery-size');
+            if (savedSize) {{
+                setSize(savedSize);
+            }}
+        }})();
+
+        function createImageElement(img) {{
+            const div = document.createElement('div');
+            div.className = 'image-item';
+            div.setAttribute('data-path', img.path);
+            div.onclick = () => openModal('/pic/' + img.path, img.path);
+            div.innerHTML = `
+                <img src="/thumb/${{img.path}}" alt="${{img.path}}" loading="lazy">
+                <div class="overlay"><div class="image-name">${{img.name}}</div></div>
+            `;
+            return div;
+        }}
+
+        async function checkForUpdates() {{
+            try {{
+                const response = await fetch('/api/images');
+                const data = await response.json();
+                const newImages = new Set(data.images.map(img => img.path));
+
+                // 检查新增的图片
+                const added = data.images.filter(img => !currentImages.has(img.path));
+
+                // 检查删除的图片
+                const removed = [...currentImages].filter(path => !newImages.has(path));
+
+                if (added.length > 0 || removed.length > 0) {{
+                    const gallery = document.getElementById('gallery');
+                    const emptyState = document.getElementById('emptyState');
+
+                    // 添加新图片
+                    added.forEach(img => {{
+                        const element = createImageElement(img);
+                        gallery.appendChild(element);
+                    }});
+
+                    // 删除已移除的图片
+                    removed.forEach(path => {{
+                        const element = gallery.querySelector(`[data-path="${{path}}"]`);
+                        if (element) {{
+                            element.remove();
+                        }}
+                    }});
+
+                    // 更新计数
+                    document.getElementById('imageCount').textContent = data.count;
+                    currentImages = newImages;
+
+                    // 处理空状态
+                    if (data.count === 0 && !emptyState) {{
+                        gallery.innerHTML = `<div class="empty-state" id="emptyState">
+                            <h2>No images</h2>
+                            <p>Add images to the directory</p>
+                        </div>`;
+                    }} else if (data.count > 0 && emptyState) {{
+                        emptyState.remove();
+                    }}
+
+                    // 显示提示
+                    if (added.length > 0) {{
+                        showToast(`+${{added.length}} image${{added.length > 1 ? 's' : ''}}`);
+                    }}
+                    if (removed.length > 0) {{
+                        showToast(`-${{removed.length}} image${{removed.length > 1 ? 's' : ''}}`);
+                    }}
+                }}
+            }} catch (error) {{
+                console.error('检查更新失败:', error);
+            }}
+        }}
+
+        // 每 3 秒检查一次更新
+        setInterval(checkForUpdates, 3000);
     </script>
 </body>
 </html>"#,
         images.len(),
         image_items,
-        if images.is_empty() { empty_msg.as_str() } else { "" }
+        if images.is_empty() { empty_msg.as_str() } else { "" },
+        serde_json::to_string(&images).unwrap_or_else(|_| "[]".to_string())
     );
 
     HttpResponse::Ok()
@@ -556,6 +828,7 @@ async fn main() -> std::io::Result<()> {
     println!("图片目录: {}", args.pic_dir);
     println!("缩略图目录: {}", app_config.thumb_dir);
     println!("访问地址: http://{}:{}/", host, args.port);
+    println!("自动刷新: 已启用 (每 3 秒检查)");
 
     let config_data = web::Data::new(app_config);
 
@@ -564,6 +837,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(config_data.clone())
             .wrap(middleware::Logger::default())
             .service(index)
+            .service(api_images)
             .service(serve_thumbnail)
             .service(serve_image)
     })
