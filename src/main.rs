@@ -304,6 +304,34 @@ async fn index(config: web::Data<AppConfig>) -> HttpResponse {
             color: #e2e8f0;
         }}
 
+        .play-btn {{
+            padding: 6px 14px;
+            border: none;
+            background: rgba(255, 255, 255, 0.05);
+            color: #64748b;
+            font-size: 0.75rem;
+            cursor: pointer;
+            border-radius: 6px;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }}
+
+        .play-btn:hover {{
+            background: rgba(255, 255, 255, 0.1);
+            color: #e2e8f0;
+        }}
+
+        .play-btn.playing {{
+            background: rgba(34, 197, 94, 0.2);
+            color: #22c55e;
+        }}
+
+        .play-icon {{
+            font-size: 0.9rem;
+        }}
+
         .gallery {{
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
@@ -421,6 +449,50 @@ async fn index(config: web::Data<AppConfig>) -> HttpResponse {
             color: #fff;
         }}
 
+        .modal-nav {{
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 48px;
+            color: rgba(255, 255, 255, 0.5);
+            cursor: pointer;
+            padding: 20px;
+            transition: color 0.2s;
+            user-select: none;
+            z-index: 1001;
+        }}
+
+        .modal-nav:hover {{
+            color: #fff;
+        }}
+
+        .modal-nav.prev {{
+            left: 10px;
+        }}
+
+        .modal-nav.next {{
+            right: 10px;
+        }}
+
+        .modal-counter {{
+            position: absolute;
+            top: 20px;
+            left: 24px;
+            color: #94a3b8;
+            font-size: 0.85rem;
+            z-index: 1001;
+        }}
+
+        .slideshow-progress {{
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 3px;
+            background: #22c55e;
+            transition: width 0.1s linear;
+            z-index: 1002;
+        }}
+
         .modal-info {{
             position: absolute;
             bottom: 20px;
@@ -521,6 +593,10 @@ async fn index(config: web::Data<AppConfig>) -> HttpResponse {
             </div>
         </div>
         <div class="toolbar-right">
+            <button class="play-btn" id="playBtn" onclick="toggleSlideshow()">
+                <span class="play-icon" id="playIcon">▶</span>
+                <span id="playText">Play</span>
+            </button>
             <div class="size-toggle">
                 <button class="size-btn" data-size="large" onclick="setSize('large')">L</button>
                 <button class="size-btn active" data-size="medium" onclick="setSize('medium')">M</button>
@@ -536,14 +612,18 @@ async fn index(config: web::Data<AppConfig>) -> HttpResponse {
     {}
 
     <div class="modal" id="imageModal">
+        <div class="slideshow-progress" id="slideshowProgress"></div>
+        <span class="modal-counter" id="modalCounter"></span>
         <span class="modal-close" onclick="closeModal()">&times;</span>
+        <span class="modal-nav prev" onclick="prevImage()">&#8249;</span>
+        <span class="modal-nav next" onclick="nextImage()">&#8250;</span>
         <div class="modal-content">
             <img id="modalImage" src="" alt="">
         </div>
         <div class="modal-info">
             <span id="modalFileName"></span>
-            <a id="modalDownload" href="" download>下载原图</a>
-            <a id="modalOpen" href="" target="_blank">新窗口打开</a>
+            <a id="modalDownload" href="" download>Download</a>
+            <a id="modalOpen" href="" target="_blank">Open</a>
         </div>
     </div>
 
@@ -551,27 +631,121 @@ async fn index(config: web::Data<AppConfig>) -> HttpResponse {
 
     <script>
         let currentImages = new Set({});
+        let imageList = [];
+        let currentIndex = 0;
+        let slideshowInterval = null;
+        let progressInterval = null;
+        let isPlaying = false;
+
+        function updateImageList() {{
+            imageList = Array.from(document.querySelectorAll('.image-item')).map(el => ({{
+                path: el.dataset.path,
+                name: el.querySelector('.image-name')?.textContent || el.dataset.path
+            }}));
+        }}
 
         function openModal(src, filename) {{
-            const modal = document.getElementById('imageModal');
-            const modalImg = document.getElementById('modalImage');
-            const modalFileName = document.getElementById('modalFileName');
-            const modalDownload = document.getElementById('modalDownload');
-            const modalOpen = document.getElementById('modalOpen');
-
-            modal.classList.add('active');
-            modalImg.src = src;
-            modalFileName.textContent = filename;
-            modalDownload.href = src;
-            modalOpen.href = src;
-
+            updateImageList();
+            currentIndex = imageList.findIndex(img => src.includes(img.path));
+            if (currentIndex === -1) currentIndex = 0;
+            showImage(currentIndex);
+            document.getElementById('imageModal').classList.add('active');
             document.body.style.overflow = 'hidden';
         }}
 
+        function showImage(index) {{
+            if (imageList.length === 0) return;
+            if (index < 0) index = imageList.length - 1;
+            if (index >= imageList.length) index = 0;
+            currentIndex = index;
+
+            const img = imageList[currentIndex];
+            const src = '/pic/' + img.path;
+
+            document.getElementById('modalImage').src = src;
+            document.getElementById('modalFileName').textContent = img.name;
+            document.getElementById('modalDownload').href = src;
+            document.getElementById('modalOpen').href = src;
+            document.getElementById('modalCounter').textContent = `${{currentIndex + 1}} / ${{imageList.length}}`;
+        }}
+
+        function nextImage() {{
+            showImage(currentIndex + 1);
+            if (isPlaying) resetProgress();
+        }}
+
+        function prevImage() {{
+            showImage(currentIndex - 1);
+            if (isPlaying) resetProgress();
+        }}
+
         function closeModal() {{
-            const modal = document.getElementById('imageModal');
-            modal.classList.remove('active');
+            document.getElementById('imageModal').classList.remove('active');
             document.body.style.overflow = 'auto';
+            stopSlideshow();
+        }}
+
+        function toggleSlideshow() {{
+            if (isPlaying) {{
+                stopSlideshow();
+            }} else {{
+                startSlideshow();
+            }}
+        }}
+
+        function startSlideshow() {{
+            updateImageList();
+            if (imageList.length === 0) {{
+                showToast('No images');
+                return;
+            }}
+
+            isPlaying = true;
+            document.getElementById('playBtn').classList.add('playing');
+            document.getElementById('playIcon').textContent = '⏸';
+            document.getElementById('playText').textContent = 'Stop';
+
+            if (!document.getElementById('imageModal').classList.contains('active')) {{
+                currentIndex = 0;
+                showImage(0);
+                document.getElementById('imageModal').classList.add('active');
+                document.body.style.overflow = 'hidden';
+            }}
+
+            resetProgress();
+            slideshowInterval = setInterval(() => {{
+                nextImage();
+            }}, 3000);
+        }}
+
+        function stopSlideshow() {{
+            isPlaying = false;
+            document.getElementById('playBtn').classList.remove('playing');
+            document.getElementById('playIcon').textContent = '▶';
+            document.getElementById('playText').textContent = 'Play';
+            document.getElementById('slideshowProgress').style.width = '0%';
+
+            if (slideshowInterval) {{
+                clearInterval(slideshowInterval);
+                slideshowInterval = null;
+            }}
+            if (progressInterval) {{
+                clearInterval(progressInterval);
+                progressInterval = null;
+            }}
+        }}
+
+        function resetProgress() {{
+            if (progressInterval) clearInterval(progressInterval);
+            let progress = 0;
+            document.getElementById('slideshowProgress').style.width = '0%';
+            progressInterval = setInterval(() => {{
+                progress += 5;
+                document.getElementById('slideshowProgress').style.width = progress + '%';
+                if (progress >= 100) {{
+                    clearInterval(progressInterval);
+                }}
+            }}, 100);
         }}
 
         document.getElementById('imageModal').addEventListener('click', function(e) {{
@@ -581,8 +755,16 @@ async fn index(config: web::Data<AppConfig>) -> HttpResponse {
         }});
 
         document.addEventListener('keydown', function(e) {{
+            const modal = document.getElementById('imageModal');
+            if (!modal.classList.contains('active')) return;
+
             if (e.key === 'Escape') {{
                 closeModal();
+            }} else if (e.key === 'ArrowRight' || e.key === ' ') {{
+                e.preventDefault();
+                nextImage();
+            }} else if (e.key === 'ArrowLeft') {{
+                prevImage();
             }}
         }});
 
